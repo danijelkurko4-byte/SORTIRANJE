@@ -9,10 +9,8 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'build')));
 
-// TVOJ GRAPHOPPER KLJUČ JE UBACEN
-const GH_API_KEY = 'dd881665-eefc-4a92-ba83-016e0ce98484'; 
-
 const ZARADA_FAJL = './zarada.json';
+const ORS_API_KEY = 'eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6ImRiMzFiZjE4NjZkZTRiMWE5MmUzNjgxZDdjMzRhZGViIiwiaCI6Im11cm11cjY0In0='; 
 const POCETNA_BAZA = "Centralna radna 4, Nova Pazova, Srbija";
 
 function procitajZaradu() {
@@ -22,15 +20,13 @@ function procitajZaradu() {
     } catch (e) { return []; }
 }
 
-// 1. Geokodiranje preko GraphHopper-a (Nalaženje ulica)
 async function geocode(adresa) {
     try {
-        const url = `https://graphhopper.com/api/1/geocode?q=${encodeURIComponent(adresa)}&locale=sr&limit=1&key=${GH_API_KEY}`;
+        const query = adresa.toLowerCase().includes("srbija") ? adresa : `${adresa}, Srbija`;
+        const url = `https://api.openrouteservice.org/geocode/search?api_key=${ORS_API_KEY}&text=${encodeURIComponent(query)}&boundary.country=RS&size=1`;
         const res = await axios.get(url);
-        if (res.data.hits && res.data.hits.length > 0) {
-            const point = res.data.hits[0].point;
-            console.log(`✅ Nađeno: ${adresa}`);
-            return [point.lng, point.lat]; // GraphHopper koristi [lon, lat]
+        if (res.data && res.data.features && res.data.features.length > 0) {
+            return res.data.features[0].geometry.coordinates;
         }
         return null;
     } catch (e) { return null; }
@@ -39,94 +35,50 @@ async function geocode(adresa) {
 app.post('/api/optimizuj', async (req, res) => {
     try {
         const { adrese, zavrsnaAdresa } = req.body;
-        console.log("Započinjem GraphHopper optimizaciju...");
+        let startCoords = await geocode(POCETNA_BAZA) || [20.2189, 44.9514];
+        let krajCoords = await geocode(zavrsnaAdresa || POCETNA_BAZA) || startCoords;
 
-        const startCoords = await geocode(POCETNA_BAZA) || [20.2189, 44.9514];
-        const krajCoords = await geocode(zavrsnaAdresa || POCETNA_BAZA) || startCoords;
-
-        let services = [];
+        let validneTacke = [];
         let adresePodaci = [];
         let neuspesneAdrese = [];
 
-        // Geokodiranje svih adresa iz Excela
-        for (let i = 0; i < adrese.length; i++) {
-            const coords = await geocode(adrese[i]);
+        for (let adr of adrese) {
+            const coords = await geocode(adr);
             if (coords) {
-                const id = `job-${i}`;
-                services.push({
-                    id: id,
-                    address: { location_id: id, lon: coords[0], lat: coords[1] }
-                });
-                adresePodaci.push({ id: id, adresa: adrese[i], coords: [coords[1], coords[0]] });
+                validneTacke.push(coords);
+                adresePodaci.push({ adresa: adr, coords: [coords[1], coords[0]] });
             } else {
-                neuspesneAdrese.push(adrese[i]);
+                neuspesneAdrese.push(adr);
             }
-            // GraphHopper dozvoljava brz tempo, 150ms pauze je dovoljno
-            await new Promise(r => setTimeout(r, 150));
+            await new Promise(r => setTimeout(r, 600));
         }
 
-        if (services.length === 0) return res.status(400).json({ error: "Nijedna adresa nije nađena." });
+        if (validneTacke.length === 0) return res.status(400).json({ error: "Nijedna adresa nije nađena." });
 
-        // 2. GraphHopper Route Optimization (VRP)
-        const ghVrpBody = {
-            vehicles: [{
-                vehicle_id: "kurir-vozilo",
-                start_address: { location_id: "start", lon: startCoords[0], lat: startCoords[1] },
-                end_address: { location_id: "end", lon: krajCoords[0], lat: krajCoords[1] },
-                type_id: "car",
-                profile: "car"
-            }],
-            services: services
-        };
+        const optRes = await axios.post('https://api.openrouteservice.org/optimization', {
+            jobs: validneTacke.map((coords, i) => ({ id: i, location: coords })),
+            vehicles: [{ id: 1, profile: 'driving-car', start: startCoords, end: krajCoords }]
+        }, { headers: { 'Authorization': ORS_API_KEY } });
 
-        const ghRes = await axios.post(`https://graphhopper.com/api/1/vrp/optimize?key=${GH_API_KEY}`, ghVrpBody);
-        
-        if (!ghRes.data.solution) throw new Error("Nema rešenja rute.");
+        const steps = optRes.data.routes[0].steps;
+        const sortirano = steps.filter(s => s.type === 'job').map(s => ({
+            adresa: adresePodaci[s.id].adresa,
+            coords: adresePodaci[s.id].coords,
+            isporuceno: false
+        }));
 
-        const activities = ghRes.data.solution.routes[0].activities;
-        
-        // Mapiranje sortiranih rezultata
-        const sortirano = activities
-            .filter(act => act.type === "service")
-            .map(act => {
-                const podaci = adresePodaci.find(p => p.id === act.id);
-                return { adresa: podaci.adresa, coords: podaci.coords, isporuceno: false };
-            });
-
-        // 3. Iscrtavanje linije puta (Road Geometry)
         let putanjaPoUlicama = [];
         try {
-            const tackeZaPut = [
-                [startCoords[1], startCoords[0]], 
-                ...sortirano.map(s => s.coords), 
-                [krajCoords[1], krajCoords[0]]
-            ];
-            
-            const pointsQuery = tackeZaPut.map(p => `point=${p[0]},${p[1]}`).join('&');
-            const routeUrl = `https://graphhopper.com/api/1/route?key=${GH_API_KEY}&type=json&points_encoded=false&profile=car&${pointsQuery}`;
-            
-            const routeRes = await axios.get(routeUrl);
-            putanjaPoUlicama = routeRes.data.paths[0].points.coordinates.map(c => [c[1], c[0]]);
-        } catch (e) {
-            console.log("Fallback na vazdušnu liniju.");
-            putanjaPoUlicama = sortirano.map(s => s.coords);
-        }
+            let siroveK = [startCoords, ...steps.filter(s => s.type === 'job').map(s => validneTacke[s.id]), krajCoords];
+            let cisteK = siroveK.filter((c, i, self) => i === 0 || (c[0] !== self[i-1][0] || c[1] !== self[i-1][1]));
+            const dirRes = await axios.post('https://api.openrouteservice.org/v2/directions/driving-car/geojson', { coordinates: cisteK }, { headers: { 'Authorization': ORS_API_KEY } });
+            putanjaPoUlicama = dirRes.data.features[0].geometry.coordinates.map(c => [c[1], c[0]]);
+        } catch (e) { putanjaPoUlicama = sortirano.map(z => z.coords); }
 
-        res.json({ 
-            sortirano, 
-            putanjaPoUlicama, 
-            neuspesneAdrese, 
-            startCoords: [startCoords[1], startCoords[0]], 
-            krajCoords: [krajCoords[1], krajCoords[0]] 
-        });
-
-    } catch (error) {
-        console.error("Greška:", error.response ? error.response.data : error.message);
-        res.status(500).json({ error: "Problem sa GraphHopper API-jem." });
-    }
+        res.json({ sortirano, putanjaPoUlicama, neuspesneAdrese, startCoords: [startCoords[1], startCoords[0]], krajCoords: [krajCoords[1], krajCoords[0]] });
+    } catch (error) { res.status(500).json({ error: "Greška na serveru" }); }
 });
 
-// Ostale rute (Zarada, Statistika)
 app.post('/api/sacuvaj-dan', (req, res) => {
     try {
         const { broj_isporuka, ukupna_suma } = req.body;
@@ -151,7 +103,10 @@ app.get('/api/statistika', (req, res) => {
     } catch (e) { res.json({ total_isporuka: 0, total_suma: 0 }); }
 });
 
-app.use((req, res) => res.sendFile(path.join(__dirname, 'build', 'index.html')));
+// POPRAVLJENO ZA RENDER (Wildcard route)
+app.use((req, res) => {
+    res.sendFile(path.join(__dirname, 'build', 'index.html'));
+});
 
 const PORT = process.env.PORT || 5001;
-app.listen(PORT, '0.0.0.0', () => console.log(`GraphHopper Server aktivan na portu ${PORT}`));
+app.listen(PORT, '0.0.0.0', () => console.log(`SERVER SPREMAN NA PORTU ${PORT}`));
