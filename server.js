@@ -2,16 +2,16 @@ const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
 const fs = require('fs');
-const path = require('path'); // Dodato
+const path = require('path');
 const app = express();
 
 app.use(cors());
 app.use(express.json());
 
-// Služi fajlove sa sajta (React)
+// Služi statičke fajlove iz build foldera (tvoj sajt)
 app.use(express.static(path.join(__dirname, 'build')));
 
-const ZARADA_FAJL = '/tmp/zarada.json'; // Render zahteva /tmp za privremene fajlove
+const ZARADA_FAJL = './zarada.json';
 const ORS_API_KEY = 'eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6ImRiMzFiZjE4NjZkZTRiMWE5MmUzNjgxZDdjMzRhZGViIiwiaCI6Im11cm11cjY0In0='; 
 const POCETNA_BAZA = "Centralna radna 4, Nova Pazova, Srbija";
 
@@ -24,7 +24,7 @@ function procitajZaradu() {
 
 async function geocode(adresa) {
     try {
-        const query = adresa.toLowerCase().includes("serbia") ? adresa : `${adresa}, Serbia`;
+        const query = adresa.toLowerCase().includes("srbija") ? adresa : `${adresa}, Srbija`;
         const url = `https://api.openrouteservice.org/geocode/search?api_key=${ORS_API_KEY}&text=${encodeURIComponent(query)}&boundary.country=RS&size=1`;
         const res = await axios.get(url);
         if (res.data && res.data.features && res.data.features.length > 0) {
@@ -82,7 +82,7 @@ app.post('/api/optimizuj', async (req, res) => {
         }
 
         res.json({ sortirano, putanjaPoUlicama, neuspesneAdrese, startCoords: [startCoords[1], startCoords[0]], krajCoords: [krajCoords[1], krajCoords[0]] });
-    } catch (error) { res.status(500).json({ error: "Greška" }); }
+    } catch (error) { res.status(500).json({ error: "Greška na serveru" }); }
 });
 
 app.post('/api/sacuvaj-dan', (req, res) => {
@@ -109,10 +109,12 @@ app.get('/api/statistika', (req, res) => {
     } catch (e) { res.json({ total_isporuka: 0, total_suma: 0 }); }
 });
 
-// Ovo omogućava React-u da radi ruting
-app.get('*', (req, res) => {
+// POPRAVLJENA LINIJA ZA RENDER (Wildcard route)
+app.get('/*', (req, res) => {
   res.sendFile(path.join(__dirname, 'build', 'index.html'));
 });
 
 const PORT = process.env.PORT || 5001;
-app.listen(PORT, () => console.log(`Aplikacija radi na portu ${PORT}`));
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`SERVER SPREMAN NA PORTU ${PORT}`);
+});
