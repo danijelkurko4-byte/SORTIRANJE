@@ -8,7 +8,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Služi statičke fajlove iz build foldera (tvoj sajt)
+// Služi statičke fajlove iz build foldera (React sajt)
 app.use(express.static(path.join(__dirname, 'build')));
 
 const ZARADA_FAJL = './zarada.json';
@@ -22,21 +22,36 @@ function procitajZaradu() {
     } catch (e) { return []; }
 }
 
+// POJAČAN GEOCODING - Pokušava više varijanti da pronađe adresu
 async function geocode(adresa) {
-    try {
-        const query = adresa.toLowerCase().includes("srbija") ? adresa : `${adresa}, Srbija`;
-        const url = `https://api.openrouteservice.org/geocode/search?api_key=${ORS_API_KEY}&text=${encodeURIComponent(query)}&boundary.country=RS&size=1`;
-        const res = await axios.get(url);
-        if (res.data && res.data.features && res.data.features.length > 0) {
-            return res.data.features[0].geometry.coordinates;
-        }
-        return null;
-    } catch (e) { return null; }
+    let cistaAdresa = adresa.toString().replace(/\s+/g, ' ').replace(/bb/gi, '').trim();
+    
+    const varijante = [
+        cistaAdresa + ", Serbia", 
+        cistaAdresa,
+        cistaAdresa.split(',')[0] + ", Serbia"
+    ];
+
+    for (let upit of varijante) {
+        try {
+            const url = `https://api.openrouteservice.org/geocode/search?api_key=${ORS_API_KEY}&text=${encodeURIComponent(upit)}&boundary.country=RS&size=1`;
+            const res = await axios.get(url);
+            if (res.data && res.data.features && res.data.features.length > 0) {
+                console.log(`✅ Nađeno: ${upit}`);
+                return res.data.features[0].geometry.coordinates;
+            }
+        } catch (e) { continue; }
+        await new Promise(r => setTimeout(r, 300));
+    }
+    console.log(`❌ Nije nađeno: ${adresa}`);
+    return null;
 }
 
 app.post('/api/optimizuj', async (req, res) => {
     try {
         const { adrese, zavrsnaAdresa } = req.body;
+        console.log("Započinjem optimizaciju...");
+
         let startCoords = await geocode(POCETNA_BAZA) || [20.2189, 44.9514];
         let krajCoords = await geocode(zavrsnaAdresa || POCETNA_BAZA) || startCoords;
 
@@ -52,17 +67,17 @@ app.post('/api/optimizuj', async (req, res) => {
             } else {
                 neuspesneAdrese.push(adr);
             }
-            await new Promise(r => setTimeout(r, 600));
+            await new Promise(r => setTimeout(r, 500));
         }
+
+        if (validneTacke.length === 0) return res.status(400).json({ error: "Nijedna adresa nije nađena." });
 
         const optRes = await axios.post('https://api.openrouteservice.org/optimization', {
             jobs: validneTacke.map((coords, i) => ({ id: i, location: coords })),
             vehicles: [{ id: 1, profile: 'driving-car', start: startCoords, end: krajCoords }]
         }, { headers: { 'Authorization': ORS_API_KEY } });
 
-        const routeData = optRes.data.routes[0];
-        const steps = routeData.steps;
-
+        const steps = optRes.data.routes[0].steps;
         const sortirano = steps.filter(s => s.type === 'job').map(s => ({
             adresa: adresePodaci[s.id].adresa,
             coords: adresePodaci[s.id].coords,
@@ -73,16 +88,12 @@ app.post('/api/optimizuj', async (req, res) => {
         try {
             let siroveK = [startCoords, ...steps.filter(s => s.type === 'job').map(s => validneTacke[s.id]), krajCoords];
             let cisteK = siroveK.filter((c, i, self) => i === 0 || (c[0] !== self[i-1][0] || c[1] !== self[i-1][1]));
-            const dirRes = await axios.post('https://api.openrouteservice.org/v2/directions/driving-car/geojson', {
-                coordinates: cisteK
-            }, { headers: { 'Authorization': ORS_API_KEY } });
+            const dirRes = await axios.post('https://api.openrouteservice.org/v2/directions/driving-car/geojson', { coordinates: cisteK }, { headers: { 'Authorization': ORS_API_KEY } });
             putanjaPoUlicama = dirRes.data.features[0].geometry.coordinates.map(c => [c[1], c[0]]);
-        } catch (e) {
-            putanjaPoUlicama = sortirano.map(z => z.coords);
-        }
+        } catch (e) { putanjaPoUlicama = sortirano.map(z => z.coords); }
 
         res.json({ sortirano, putanjaPoUlicama, neuspesneAdrese, startCoords: [startCoords[1], startCoords[0]], krajCoords: [krajCoords[1], krajCoords[0]] });
-    } catch (error) { res.status(500).json({ error: "Greška na serveru" }); }
+    } catch (error) { res.status(500).json({ error: "Serverska greška" }); }
 });
 
 app.post('/api/sacuvaj-dan', (req, res) => {
@@ -109,12 +120,10 @@ app.get('/api/statistika', (req, res) => {
     } catch (e) { res.json({ total_isporuka: 0, total_suma: 0 }); }
 });
 
-// POPRAVLJEN DEFAULT HANDLER ( Middleware umesto app.get )
+// POPRAVLJENO ZA RENDER (Wildcard route)
 app.use((req, res) => {
-  res.sendFile(path.join(__dirname, 'build', 'index.html'));
+    res.sendFile(path.join(__dirname, 'build', 'index.html'));
 });
 
 const PORT = process.env.PORT || 5001;
-app.listen(PORT, '0.0.0.0', () => {
-    console.log(`SERVER SPREMAN NA PORTU ${PORT}`);
-});
+app.listen(PORT, '0.0.0.0', () => console.log(`SERVER SPREMAN NA PORTU ${PORT}`));
