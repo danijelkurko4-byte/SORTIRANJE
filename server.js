@@ -109,8 +109,8 @@ app.get('/api/statistika', (req, res) => {
     } catch (e) { res.json({ total_isporuka: 0, total_suma: 0 }); }
 });
 
-// POPRAVLJENA LINIJA ZA RENDER (Wildcard route)
-app.get('/*', (req, res) => {
+// POPRAVLJEN DEFAULT HANDLER ( Middleware umesto app.get )
+app.use((req, res) => {
   res.sendFile(path.join(__dirname, 'build', 'index.html'));
 });
 
